@@ -1,9 +1,16 @@
+package com.nets.sg.core.testData.service;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.nets.sg.core.testData.domain.TestData;
+import com.nets.sg.core.testData.port.in.ExecuteTestDataUseCase;
+import com.nets.sg.core.testData.port.out.QueryTestDataPort;
+import com.nets.sg.core.testResult.domain.TestDataResult;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import lombok.RequiredArgsConstructor;
 
 import java.io.File;
 import java.io.IOException;
@@ -14,31 +21,45 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import org.springframework.stereotype.Service;
 
-public class ApiRequestSender {
+@Service
+@RequiredArgsConstructor
+public class ExecuteTestDataService implements ExecuteTestDataUseCase {
 
-    private static final HttpClient client = HttpClient.newHttpClient();
+    private final QueryTestDataPort queryTestDataPort;
+
+
+    private final RestClient restClient
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     // Track request start times and completion status by correlation ID
     private static final ConcurrentHashMap<String, Instant> requestTimeMap = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, Boolean> requestCompletedMap = new ConcurrentHashMap<>();
-
-    // List to store test results for presentation
-    private static final List<Map<String, Object>> resultsList = Collections.synchronizedList(new ArrayList<>());
-
-    // Duration for the API test (e.g., 2 hours)
-    private static final long TEST_DURATION_HOURS = 2;
-    private static final long TEST_DURATION_SECONDS = TEST_DURATION_HOURS * 3600;
+    private static long TEST_DURATION_SECONDS = 0;
 
     // Port for intercepting the second API
-    private static final int INTERCEPTOR_PORT = 8080;
-    private ExecutorService apiExecutor = Executors.newFixedThreadPool(10);
+    private static String INTERCEPTOR_PORT = "0";
 
-    public static void main(String[] args) throws Exception {
-        // Start the interceptor server
+    @Override
+    public TestDataResult executeTestData(String testDataId) throws IOException {
+
+        Optional<TestData> testDataOpt = queryTestDataPort.findById(testDataId);
+        TestData testData;
+        if (testDataOpt.isPresent())
+            testData = testDataOpt.get();
+        else {
+            return new TestDataResult(); //Failed to Find test data
+        }
+
         startInterceptorServer();
 
         // ScheduledExecutorService to schedule tasks at fixed intervals
@@ -51,29 +72,34 @@ public class ApiRequestSender {
         scheduler.scheduleAtFixedRate(() -> {
             try {
                 // Check if test duration has exceeded the limit (2 hours)
-                if (Duration.between(testStartTime, Instant.now()).getSeconds() > TEST_DURATION_SECONDS) {
+                if (Duration.between(testStartTime, Instant.now()).getSeconds() > testData.getTestDuration()) {
                     scheduler.shutdown();
                     System.out.println("Test completed. No more requests will be sent.");
                     // Show final results
-                    displayTestResults();
                 } else {
                     // Process an individual API request
-                    processRequest();
+                    processRequest(testData);
                 }
             } catch (Exception e) {
                 e.printStackTrace();
             }
-        }, 0, 1, TimeUnit.SECONDS);  // Delay = 0, Period = 1 second (1 request per second)
+        }, 0, 1, TimeUnit.SECONDS); // Delay = 0, Period = 1 second (1 request per second)
+
+
+
+
     }
 
-    private static void processRequest() throws Exception {
+    private static void processRequest(TestData testData) throws Exception {
         // Load JSON from file
         File jsonFile = new File("request-data.json");
         JsonNode jsonData = objectMapper.readTree(jsonFile);
 
         // Extract headers and body from JSON
-        ObjectNode headersNode = (ObjectNode) jsonData.get("headers");
-        ObjectNode bodyNode = (ObjectNode) jsonData.get("body");
+//        ObjectNode headersNode = (ObjectNode) jsonData.get("headers");
+//        ObjectNode bodyNode = (ObjectNode) jsonData.get("body");
+
+        ObjectNode headersNode = (ObjectNode) testData.getHeaders();
 
         // Generate a unique correlation ID
         String correlationId = generateCorrelationId();
@@ -196,17 +222,6 @@ public class ApiRequestSender {
 
             // Mark as completed
             requestCompletedMap.put(correlationId, true);
-        }
-    }
-
-    // Display test results at the end
-    private static void displayTestResults() {
-        System.out.println("\n--- Test Results ---");
-        for (String correlationId : requestTimeMap.keySet()) {
-            Instant startTime = requestTimeMap.get(correlationId);
-            Boolean isCompleted = requestCompletedMap.get(correlationId);
-            Duration duration = isCompleted ? Duration.between(startTime, Instant.now()) : Duration.ZERO;
-            System.out.println("Correlation ID: " + correlationId + " | Time Taken: " + duration.toMillis() + " ms | Completed: " + isCompleted);
         }
     }
 }
